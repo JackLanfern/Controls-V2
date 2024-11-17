@@ -1,0 +1,248 @@
+# Author: Carson Baker
+# Date Last Modified: 11/11/2024
+# Description: Perform inverse kinematics, numerical Jacobian, for 6DOF robot
+# Input: DH parameters, target position/rotation, joint bounds position/rotation
+# Output: Joint angles to reach target position if converges, plot of robot, torque calcs
+
+# Imports and such
+from numpy import *
+import matplotlib.pyplot as plt
+
+# Functions!
+# Generate DH transformation matrix using NumPy
+# Input: DH parameters d, theta, a, alphs
+# Output: 4x4 DH transformation matrix
+def DH_trans_matrix(d, theta, a, alpha):
+    return array([
+        [cos(theta), -sin(theta) * cos(alpha), sin(theta) * sin(alpha), a * cos(theta)],
+        [sin(theta), cos(theta) * cos(alpha), -cos(theta) * sin(alpha), a * sin(theta)],
+        [0, sin(alpha), cos(alpha), d],
+        [0, 0, 0, 1]
+    ])
+
+# Forward Kinematic function
+# Input: Joint angles, DH parameters, # DOF
+# Output: (x,y,z) Positions of each joint 
+def forward_kinematics(joints, DH_params, DOF):
+    positions = [array([0, 0, 0])]  # Start with the origin
+    trans = eye(4)
+    for i in range(DOF):
+        d, a, alpha = DH_params[i]
+        theta = joints[i]
+        trans = trans @ DH_trans_matrix(d, theta, a, alpha)
+        positions.append(trans[:3, 3])  # Store the x, y, z position of each joint
+    return array(positions)
+
+# Inverse Kinematic Function
+# Input: Initial joint position, target position/rotation, DH parameters, Joint limits rotation/position, # DOF
+# Output: New joint angles, new (x,y,z) joint position, error from target
+def inverse_kinematics(joints_init, target, DH_params, joint_limits, joint_position_limits, DOF, iterations=100, tolerance=0.01):
+    joints = joints_init
+    target_pos = target[:3, 3]
+    for _ in range(iterations):
+        current_pos = forward_kinematics(joints, DH_params, DOF)[-1]  # End-effector position
+        position_error = target_pos - current_pos
+
+        if linalg.norm(position_error) < tolerance:
+            break
+
+        jacobian = zeros((3, DOF))
+        delta = 1e-6
+        for i in range(DOF):
+            joints_delta = joints.copy()
+            joints_delta[i] += delta
+            pos_delta = forward_kinematics(joints_delta, DH_params, DOF)[-1]
+            jacobian[:, i] = (pos_delta - current_pos) / delta
+
+        joint_update = linalg.pinv(jacobian).dot(position_error)
+        joints += joint_update
+
+        for i in range(DOF):
+            joints[i] = clip(joints[i], joint_limits[i][0], joint_limits[i][1])
+
+        joint_positions = forward_kinematics(joints, DH_params, DOF)
+        for i in range(DOF):
+            if joint_positions[i, 2] < joint_position_limits[i][2][0]:
+                joint_positions[i, 2] = joint_position_limits[i][2][0]
+
+    final_position = forward_kinematics(joints, DH_params, DOF)[-1]
+    error_distance = linalg.norm(target_pos - final_position)
+    return joints, forward_kinematics(joints, DH_params, DOF), error_distance
+
+# Plot robot links/joints, origin, end effector position/rotation
+# Input: Joint positions, target position, rotation matrices
+# Output: 3D plot of Robot
+def plot_robot(joint_positions, target_position, rotation_matrix):
+    fig = plt.figure(figsize=(8, 8))
+    ax = fig.add_subplot(111, projection='3d')
+    
+    ax.plot(joint_positions[:, 0], joint_positions[:, 1], joint_positions[:, 2], '-o', label="Robot Arm", color="blue")
+    ax.scatter(*target_position, color='red', label='Target Position', s=50)
+    ax.scatter(0, 0, 0, color='green', label='Origin', s=50)
+
+    end_effector_position = target_position
+    ax.quiver(end_effector_position[0], end_effector_position[1], end_effector_position[2],
+              rotation_matrix[0, 0], rotation_matrix[1, 0], rotation_matrix[2, 0], color='red', length=20, normalize=True)
+    ax.quiver(end_effector_position[0], end_effector_position[1], end_effector_position[2],
+              rotation_matrix[0, 1], rotation_matrix[1, 1], rotation_matrix[2, 1], color='green', length=20, normalize=True)
+    ax.quiver(end_effector_position[0], end_effector_position[1], end_effector_position[2],
+              rotation_matrix[0, 2], rotation_matrix[1, 2], rotation_matrix[2, 2], color='blue', length=20, normalize=True)
+
+    ax.set_xlabel('X axis')
+    ax.set_ylabel('Y axis')
+    ax.set_zlabel('Z axis')
+    ax.set_title('Robot Configuration with Orientation')
+
+    padding = 10
+    ax.set_xlim(joint_positions[:, 0].min() - padding, joint_positions[:, 0].max() + padding)
+    ax.set_ylim(joint_positions[:, 1].min() - padding, joint_positions[:, 1].max() + padding)
+    ax.set_zlim(joint_positions[:, 2].min() - padding, joint_positions[:, 2].max() + padding)
+
+    ax.legend()
+    plt.show()
+
+# Calculate static gravitational torque
+# Joint positions, link mass, gravity g, # DOF
+# Output: Torques wrt (x,y,z) axes 
+def calculate_static_gravitational_torque(joint_positions, masses, g, DOF):
+    torques = zeros((DOF, 3))
+    total_force = array([0, 0, -g])
+
+    for i in reversed(range(DOF)):
+        if i < DOF - 1:
+            r_com = (joint_positions[i+1] - joint_positions[i]) / 2
+        else:
+            r_com = (joint_positions[i] - joint_positions[i-1]) / 2
+
+        force = masses[i] * total_force
+        torque = cross(r_com, force)
+        torques[i] = torque
+
+    return torques
+
+# Convert Euler angles to rotational matrices
+# Input: pitch, yaw, roll
+# Output: Rotational matrices
+def euler_to_rotation_matrix(pitch, yaw, roll):
+    Rx = array([
+        [1, 0, 0],
+        [0, cos(pitch), -sin(pitch)],
+        [0, sin(pitch), cos(pitch)]
+    ])
+    Ry = array([
+        [cos(yaw), 0, sin(yaw)],
+        [0, 1, 0],
+        [-sin(yaw), 0, cos(yaw)]
+    ])
+    Rz = array([
+        [cos(roll), -sin(roll), 0],
+        [sin(roll), cos(roll), 0],
+        [0, 0, 1]
+    ])
+    return Rz @ Ry @ Rx
+
+# Main function
+def main():
+    # Define target and initial joint values
+    # Define target position
+    x_tar = 180.
+    y_tar = 60.
+    z_tar = 150.
+    # Euler angles for pitch, yaw, and roll (in radians)
+    pitch = radians(0)  # Rotation around X-axis
+    yaw = radians(0)    # Rotation around Y-axis
+    roll = radians(0)   # Rotation around Z-axis
+    # Convert Euler angles to a rotational matrix
+    rotation_tar = euler_to_rotation_matrix(pitch, yaw, roll)
+    # Initial joint position/guess
+    joints_init = array([0, -pi/2, 0, pi/2, 0, 0])
+
+    # Target 4x4 matrix based on position + rotation targets
+    target = array([
+        [rotation_tar[0, 0], rotation_tar[0, 1], rotation_tar[0, 2], x_tar],
+        [rotation_tar[1, 0], rotation_tar[1, 1], rotation_tar[1, 2], y_tar],
+        [rotation_tar[2, 0], rotation_tar[2, 1], rotation_tar[2, 2], z_tar],
+        [0, 0, 0, 1]
+    ])
+
+    # Define DH parameters
+    # Order: d, a, alpha
+    d1 = 119.770
+    d2 = 0
+    d3 = 0
+    d4 = 222.63
+    d5 = 0
+    d6 = 41.0
+
+    a1 = 64.2
+    a2 = 305
+    a3 = 0
+    a4 = 0
+    a5 = 0
+    a6 = 0
+
+    alpha1 = radians( -90 )
+    alpha2 = radians( 0 )
+    alpha3 = radians( 90 )
+    alpha4 = radians( - 90 )
+    alpha5 = radians( 90 )
+    alpha6 = radians( 0 )
+
+    DH_params = [
+        [d1, a1, alpha1],
+        [d2, a2, alpha2],
+        [d3, a3, alpha3],
+        [d4, a4, alpha4],
+        [d5, a5, alpha5],
+        [d6, a6, alpha6]
+    ]
+
+    # Joint Limitations
+    # Rotation limits in radians
+    joint_limits = [
+        [-pi, pi],       # Joint 1: [-180°, 180°] -> full rotation (360°)
+        [-pi/2, pi/2],   # Joint 2: [-90°, 90°]
+        [-pi, pi],       # Joint 3: [-180°, 180°] -> full rotation (360°)
+        [-pi, pi],       # Joint 4: [-180°, 180°] -> full rotation (360°)
+        [-3*pi/4, 3*pi/4], # Joint 5: [-135°, 135°] -> 270° total
+        [-pi, pi]        # Joint 6: [-180°, 180°] -> full rotation (360°)
+    ]
+    joint_position_limits = [
+        [(-inf, inf), (-inf, inf), (0, inf)],
+        [(-inf, inf), (-inf, inf), (0, inf)],
+        [(-inf, inf), (-inf, inf), (0, inf)],
+        [(-inf, inf), (-inf, inf), (0, inf)],
+        [(-inf, inf), (-inf, inf), (0, inf)],
+        [(-inf, inf), (-inf, inf), (0, inf)]
+    ]
+    
+    # Define number of degrees of freedom so code knows
+    DOF = 6
+
+    # Define gravity and masses
+    g = 9.80665 # m/s
+    # Mass [kg] for link 1,2,...,6 
+    m1 = 2.5
+    m2 = 3.0
+    m3 = 1.4
+    m4 = 1.0
+    m5 = 0.8
+    m6 = 0.5
+    masses = [m1,m2,m3,m4,m5,m6]
+
+    # Solve IK, plot, and print error distance
+    joints_solution, joint_positions, error_distance = inverse_kinematics(joints_init, target, DH_params, joint_limits, joint_position_limits, DOF)
+    plot_robot(joint_positions, target[:3, 3], rotation_tar)
+    print("Error Distance:", error_distance)
+    print("Joints: ", joints_solution)
+
+    # Calculate torques if needed
+    T_calc = False
+    if T_calc:
+        torques = calculate_static_gravitational_torque(joint_positions, masses, g, DOF)
+        print("Static Gravitational Torques at Each Joint (N*m):")
+        for i, torque in enumerate(torques):
+            print(f"Joint {i+1}: [{torque[0]:.3f}, {torque[1]:.3f}, {torque[2]:.3f}]")
+
+if __name__ == "__main__":
+    main()
